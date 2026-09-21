@@ -100,14 +100,27 @@ def main(argv=None) -> int:
                 console.analyzing(backend.model)
                 try:
                     classification = classify(snapshot, backend=backend)
-                except TypeError as exc:
-                    if "authentication" not in str(exc).lower():
+                except Exception as exc:
+                    # Each SDK signals "no credentials" with its own exception
+                    # type, so match on the message rather than the class.
+                    text = str(exc).lower()
+                    if not any(
+                        marker in text
+                        for marker in ("credential", "api_key", "api key", "authentication")
+                    ):
                         raise
+                    key = (
+                        "OPENAI_API_KEY"
+                        if type(backend).__name__.startswith("OpenAI")
+                        else "ANTHROPIC_API_KEY"
+                    )
                     print(
-                        "\nNo API credentials found for the semantic mapper.\n"
-                        "  Set one:      export ANTHROPIC_API_KEY=sk-ant-...\n"
-                        "  Or log in:    ant auth login\n"
-                        "  Or skip the LLM entirely with --candidates <file.json>\n",
+                        f"\nNo API credentials found for provider "
+                        f"'{type(backend).__name__}' (model {backend.model}).\n\n"
+                        f"  Put it in .env:   {key}=...\n"
+                        f"  Or export it:     export {key}=...\n"
+                        f"  Or skip the LLM:  --candidates <file.json>\n\n"
+                        f"  Copy .env.example to .env to get started.\n",
                         file=sys.stderr,
                     )
                     return 2

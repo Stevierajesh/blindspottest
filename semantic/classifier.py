@@ -11,8 +11,8 @@ Selecting a model:
     # explicit — the usual way
     classify(snapshot, backend=AnthropicBackend(model="claude-sonnet-5"))
 
-    # environment
-    BLINDSPOT_LLM_PROVIDER=anthropic BLINDSPOT_LLM_MODEL=claude-sonnet-5
+    # environment, or a .env file in the working directory
+    BLINDSPOT_LLM_PROVIDER=openai BLINDSPOT_LLM_MODEL=gpt-5
 
     # your own provider
     register_backend("acme", lambda model: AcmeBackend(model or "acme-1"))
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Callable, Protocol, runtime_checkable
 
 from semantic.schemas import (
@@ -182,8 +183,63 @@ class AnthropicBackend:
         return next(block.text for block in response.content if block.type == "text")
 
 
+class OpenAIBackend:
+    """OpenAI backend, using strict JSON-schema structured outputs.
+
+    The schema `candidate_set_schema()` produces already satisfies OpenAI's
+    strict mode: every object carries `additionalProperties: false` and lists
+    every property in `required`. That is not a coincidence — the Pydantic
+    models were written with no field defaults for exactly this reason.
+    """
+
+    DEFAULT_MODEL = "gpt-5"
+
+    def __init__(self, model: str | None = None, *, client=None, max_tokens: int = 16_000):
+        self.model = model or self.DEFAULT_MODEL
+        self.max_tokens = max_tokens
+        self._client = client
+
+    @property
+    def client(self):
+        if self._client is None:
+            try:
+                import openai
+            except ImportError:
+                raise RuntimeError(
+                    "the openai package is not installed — "
+                    "run: .venv/bin/pip install openai"
+                ) from None
+            self._client = openai.OpenAI()  # reads OPENAI_API_KEY
+        return self._client
+
+    def complete_json(self, *, system: str, user: str, schema: dict) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "candidate_set",
+                    "schema": schema,
+                    "strict": True,
+                },
+            },
+        )
+        choice = response.choices[0]
+        # Strict mode can still refuse; the refusal arrives in its own field
+        # rather than as an exception.
+        refusal = getattr(choice.message, "refusal", None)
+        if refusal:
+            raise RuntimeError(f"{self.model} declined to classify this page: {refusal}")
+        return choice.message.content
+
+
 _BACKENDS: dict[str, Callable[[str | None], LLMBackend]] = {
     "anthropic": lambda model: AnthropicBackend(model),
+    "openai": lambda model: OpenAIBackend(model),
 }
 
 
@@ -293,8 +349,28 @@ def classify(
     )
 
 
+def load_dotenv(path: str | os.PathLike = ".env") -> None:
+    """Read simple KEY=VALUE lines from a .env file into the environment.
+
+    Deliberately tiny and dependency-free. Real environment variables always
+    win, so an exported key is never silently overridden by a stale file.
+    """
+    file = Path(path)
+    if not file.is_file():
+        return
+    for line in file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def backend_for(provider: str | None = None, model: str | None = None) -> LLMBackend:
     """Build a backend explicitly, falling back to the environment per field."""
+    load_dotenv()
     provider = (
         provider or os.environ.get("BLINDSPOT_LLM_PROVIDER", DEFAULT_PROVIDER)
     ).lower()
