@@ -56,8 +56,12 @@ with. Nothing you see can tell you whether saving works.
 describes the EVIDENCE for your reading, not a defect.
 
 WHAT QUALIFIES:
-  - An editable field whose value the user would expect to persist: profile \
-details, settings, preferences, notes, toggles.
+  - A FREE-TEXT field whose value the user would expect to persist: profile \
+details, bios, display names, notes, descriptions.
+  - Only these two shapes are in scope:
+      * `"tag": "textarea"`
+      * `"tag": "input"` with `"type": "text"` or `"type": "search"`
+    Propose nothing else, however plausibly persistent it looks.
   - Pair it with the control that commits the change — usually a nearby \
 button with text like Save, Update, Apply, or Submit.
   - If helper text indicates automatic saving ("saves automatically", \
@@ -65,6 +69,13 @@ button with text like Save, Update, Apply, or Submit.
 in `reasoning_summary`.
 
 WHAT DOES NOT QUALIFY:
+  - Any field outside the two shapes above. Checkboxes, radios, switches, \
+selects/dropdowns, date and time pickers, number and range inputs, colour \
+pickers, file uploads, and contenteditable rich-text editors are ALL out of \
+scope for now — skip them silently, even when they clearly hold persistent \
+state.
+  - Email, url, and tel inputs. They look like text fields but enforce a \
+format, so they are out of scope too.
   - Search boxes, filters, and sort controls — transient view state.
   - Login and signup fields, one-time codes, payment entry.
   - Fields marked `disabled` or `readonly`, or any element without \
@@ -78,17 +89,21 @@ snapshot you were given (e.g. "e3"). Never invent one.
   - `commit_action_id` must name a button or link, never an input field.
 
 SUCCESS SIGNAL — how the page would confirm a save:
-  - "text": a confirmation message appears. `expected_pattern` is a short \
-lowercase substring to match, e.g. "saved".
-  - "element": a specific snapshot element appears. Set `element_id`.
-  - "value_retained": no visible confirmation; the value simply persists.
-  - "url": the page navigates. `expected_pattern` matches the new URL.
-  - Set `success_signal` to null when the snapshot gives you nothing to go on. \
-Do not guess a confirmation message that has no basis in the snapshot.
+  - The only supported form is visible confirmation text: `type` is "text" \
+and `expected_pattern` is a short lowercase substring, e.g. "saved \
+successfully".
+  - Base it on wording actually present in the snapshot, or clearly implied \
+by it. Do not invent a confirmation message.
+  - Set `success_signal` to null when the snapshot gives you nothing to go \
+on. Null is much better than a guess: a wrong pattern makes the test \
+inconclusive, while null lets the runner fall back to a weaker check.
 
-CONFIDENCE is how strongly the snapshot supports "this is persistent user \
-state" — not how likely it is to fail. A clearly-labelled Bio field beside a \
-Save button is high confidence. An ambiguous unlabelled text input is low.
+APPLICABILITY_CONFIDENCE is how strongly the snapshot supports "the \
+persistence invariant applies here" — NOT how likely the page is to be \
+broken. You are not predicting defects. A clearly-labelled Bio field beside a \
+Save button is high; an ambiguous unlabelled text input is low. Once the test \
+runs, whether the value survived a reload is a deterministic comparison with \
+no confidence attached.
 
 Return only candidates you actually believe in. An empty list is a valid and \
 correct answer for a page with no persistent state.\
@@ -234,9 +249,6 @@ def _check_references(
     if signal is not None:
         if not signal.is_coherent():
             return f"success_signal of type {signal.type.value!r} is missing its payload"
-        if signal.element_id is not None and signal.element_id not in elements:
-            return f"success_signal element_id {signal.element_id!r} is not in the snapshot"
-
     return None
 
 
@@ -271,7 +283,7 @@ def classify(
         else:
             rejected.append(RejectedCandidate(candidate=candidate, reason=reason))
 
-    kept.sort(key=lambda c: c.confidence, reverse=True)
+    kept.sort(key=lambda c: c.applicability_confidence, reverse=True)
 
     return ClassificationResult(
         url=snapshot.get("url", ""),

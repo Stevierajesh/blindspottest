@@ -28,41 +28,37 @@ class InteractionType(str, Enum):
 
 
 class SignalType(str, Enum):
-    """How a page tells the user a commit succeeded."""
+    """How a page tells the user a commit succeeded.
 
-    TEXT = "text"              # a toast/banner appears — match expected_pattern
-    ELEMENT = "element"        # a specific element appears — see element_id
-    VALUE_RETAINED = "value_retained"  # no explicit signal; the value just sticks
-    URL = "url"                # navigation/redirect — match expected_pattern
+    MVP supports one form: visible confirmation text. Toasts that vanish on a
+    timer, button spinners, disabled->enabled transitions, closing modals, and
+    HTTP-level observation are all real and all deliberately out of scope —
+    each needs its own timing model in the runner, and none is required to
+    demonstrate a persistence blindspot.
+    """
+
+    TEXT = "text"  # a confirmation message appears — match expected_pattern
 
 
 class SuccessSignal(BaseModel):
     """What the runner should watch for after triggering the commit action.
 
-    Optional fields carry no defaults on purpose: the model must emit them
-    explicitly as null. That keeps every property in the JSON Schema's
-    `required` list, which strict structured-output modes demand.
+    `expected_pattern` carries no default on purpose: the model must emit it
+    explicitly. That keeps every property in the JSON Schema's `required`
+    list, which strict structured-output modes demand.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     type: SignalType
-    expected_pattern: str | None = Field(
-        description="Case-insensitive substring to look for. Required for "
-        "'text' and 'url' signals; null otherwise."
-    )
-    element_id: str | None = Field(
-        description="Element id from the snapshot (e.g. 'e7') expected to "
-        "appear. Required for 'element' signals; null otherwise."
+    expected_pattern: str = Field(
+        description="Case-insensitive substring of the confirmation message, "
+        "e.g. 'saved successfully'. Take it from text actually present in the "
+        "snapshot or clearly implied by it; do not invent wording."
     )
 
     def is_coherent(self) -> bool:
-        """Whether this signal carries the payload its own type needs."""
-        if self.type in (SignalType.TEXT, SignalType.URL):
-            return bool(self.expected_pattern)
-        if self.type is SignalType.ELEMENT:
-            return bool(self.element_id)
-        return True  # VALUE_RETAINED needs nothing
+        return bool(self.expected_pattern.strip())
 
 
 class PersistentMutationCandidate(BaseModel):
@@ -85,11 +81,13 @@ class PersistentMutationCandidate(BaseModel):
         "no confirmation is discernible from the snapshot."
     )
 
-    confidence: float = Field(
+    applicability_confidence: float = Field(
         ge=0.0,
         le=1.0,
-        description="0-1. How strongly the snapshot suggests this is "
-        "persistent state — NOT how likely it is to be broken.",
+        description="0-1. How strongly the snapshot suggests the persistence "
+        "invariant APPLIES here — not how likely the page is to be broken. "
+        "Once the test runs, whether the value survived a reload is a "
+        "deterministic comparison with no confidence attached to it.",
     )
 
     reasoning_summary: str = Field(

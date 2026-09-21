@@ -34,7 +34,11 @@ Per-element keys, all optional except `id`, `tag` and `selector`:
     disabled       \
     readonly       | present only when true
     required       /
-    selector       CSS selector for re-finding the element later
+    accessible_name  the name Playwright's get_by_role matches on
+    locator_strategy how the runner re-finds this element — {"type": "role",
+                     "role": ..., "name": ...} where possible, falling back to
+                     label / placeholder / test_id / css
+    selector       CSS selector; a last-resort fallback for locator_strategy
 
 Keys that don't apply are omitted rather than set to null, which keeps the
 token cost down and stops the model from reasoning about absent fields.
@@ -251,6 +255,25 @@ _EXTRACT_JS = r"""
     return !!el.isContentEditable;
   }
 
+  // How the runner should re-find this element after a reload. Semantic
+  // locators come first: role + accessible name describes what an element IS,
+  // so it survives re-renders, reordering, and changed markup in a way a CSS
+  // path does not. The `e2`-style id only connects the model's answer back to
+  // this snapshot; it is never used to drive the browser.
+  function locatorStrategy(el, role, accessibleName, placeholder) {
+    if (role && accessibleName) {
+      return { type: 'role', role: role, name: accessibleName };
+    }
+    const labelText = labelElementText(el);
+    if (labelText) return { type: 'label', name: labelText };
+    if (placeholder) return { type: 'placeholder', name: placeholder };
+    for (const attr of ['data-testid', 'data-test-id', 'data-test']) {
+      const val = el.getAttribute(attr);
+      if (val) return { type: 'test_id', value: val };
+    }
+    return { type: 'css', selector: selectorFor(el) };
+  }
+
   // Prefer selectors an author chose over positional ones, since the runner
   // re-resolves these after a reload and nth-of-type paths drift.
   function selectorFor(el) {
@@ -343,6 +366,12 @@ _EXTRACT_JS = r"""
     const nearby = nearbyText(el, [label, visible, placeholder, text]);
     if (nearby) entry.nearby_text = nearby;
 
+    // For a control, the accessible name is its label; for a button or link
+    // it is its own text. This is what Playwright matches on in get_by_role.
+    const accName = label || text || null;
+    if (accName) entry.accessible_name = accName;
+
+    entry.locator_strategy = locatorStrategy(el, role, accName, placeholder);
     entry.selector = selectorFor(el);
     elements.push(entry);
   }
