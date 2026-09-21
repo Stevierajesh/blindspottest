@@ -1,0 +1,323 @@
+"""Semantic mapper: hand a page snapshot to an LLM, get back testable candidates.
+
+Provider-agnostic by construction. The classifier only knows about an
+`LLMBackend` — anything that can take a system prompt, a user prompt, and a
+JSON Schema, and return JSON text. Claude is the default backend because it
+supports strict structured outputs, but nothing in the classification logic
+depends on it.
+
+Selecting a model:
+
+    # explicit — the usual way
+    classify(snapshot, backend=AnthropicBackend(model="claude-sonnet-5"))
+
+    # environment
+    BLINDSPOT_LLM_PROVIDER=anthropic BLINDSPOT_LLM_MODEL=claude-sonnet-5
+
+    # your own provider
+    register_backend("acme", lambda model: AcmeBackend(model or "acme-1"))
+
+The boundary this module enforces: the LLM says "persistence testing applies
+here", never "this is broken". Nothing downstream of `classify()` treats a
+candidate as a defect.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Callable, Protocol, runtime_checkable
+
+from semantic.schemas import (
+    CandidateSet,
+    ClassificationResult,
+    PersistentMutationCandidate,
+    RejectedCandidate,
+    candidate_set_schema,
+)
+
+DEFAULT_PROVIDER = "anthropic"
+
+SYSTEM_PROMPT = """\
+You identify which interactions on a web page represent PERSISTENT, \
+USER-CONTROLLED STATE — state a user sets, that is expected to survive a page \
+reload.
+
+You are given a simplified description of a page: its interactive elements, \
+their roles, labels, current values, and nearby helper text. You return \
+candidates that persistence testing should be applied to.
+
+SCOPE — read this carefully:
+  - Your job is "this LOOKS LIKE something persistence testing applies to."
+  - Your job is NOT "this is broken." You have no evidence of behaviour; you \
+are looking at a static description of a page that has not been interacted \
+with. Nothing you see can tell you whether saving works.
+  - Never speculate about bugs, data loss, or failures. `reasoning_summary` \
+describes the EVIDENCE for your reading, not a defect.
+
+WHAT QUALIFIES:
+  - An editable field whose value the user would expect to persist: profile \
+details, settings, preferences, notes, toggles.
+  - Pair it with the control that commits the change — usually a nearby \
+button with text like Save, Update, Apply, or Submit.
+  - If helper text indicates automatic saving ("saves automatically", \
+"changes are saved as you type"), set `commit_action_id` to null and say so \
+in `reasoning_summary`.
+
+WHAT DOES NOT QUALIFY:
+  - Search boxes, filters, and sort controls — transient view state.
+  - Login and signup fields, one-time codes, payment entry.
+  - Fields marked `disabled` or `readonly`, or any element without \
+`editable: true`.
+  - Navigation links and buttons that only move between pages.
+
+REFERENCES:
+  - `field_id` and `commit_action_id` MUST be `id` values that appear in the \
+snapshot you were given (e.g. "e3"). Never invent one.
+  - `field_id` must name an element with `editable: true`.
+  - `commit_action_id` must name a button or link, never an input field.
+
+SUCCESS SIGNAL — how the page would confirm a save:
+  - "text": a confirmation message appears. `expected_pattern` is a short \
+lowercase substring to match, e.g. "saved".
+  - "element": a specific snapshot element appears. Set `element_id`.
+  - "value_retained": no visible confirmation; the value simply persists.
+  - "url": the page navigates. `expected_pattern` matches the new URL.
+  - Set `success_signal` to null when the snapshot gives you nothing to go on. \
+Do not guess a confirmation message that has no basis in the snapshot.
+
+CONFIDENCE is how strongly the snapshot supports "this is persistent user \
+state" — not how likely it is to fail. A clearly-labelled Bio field beside a \
+Save button is high confidence. An ambiguous unlabelled text input is low.
+
+Return only candidates you actually believe in. An empty list is a valid and \
+correct answer for a page with no persistent state.\
+"""
+
+
+@runtime_checkable
+class LLMBackend(Protocol):
+    """Minimum surface the classifier needs from any provider.
+
+    `complete_json` must return the model's raw response text, which should be
+    a JSON object conforming to `schema`. Enforcing that server-side is
+    preferred where the provider supports it; prompt-level instruction is an
+    acceptable fallback, since the result is validated here regardless.
+    """
+
+    model: str
+
+    def complete_json(self, *, system: str, user: str, schema: dict) -> str:
+        ...
+
+
+class AnthropicBackend:
+    """Default backend. Uses Claude's strict structured outputs.
+
+    The model is a constructor argument, not a constant — pass any Claude
+    model id, or set BLINDSPOT_LLM_MODEL.
+    """
+
+    DEFAULT_MODEL = "claude-opus-5"
+
+    def __init__(
+        self,
+        model: str | None = None,
+        *,
+        client=None,
+        max_tokens: int = 16_000,
+        effort: str | None = None,
+    ):
+        self.model = model or self.DEFAULT_MODEL
+        self.max_tokens = max_tokens
+        self.effort = effort
+        self._client = client
+
+    @property
+    def client(self):
+        # Imported lazily so the rest of the package works without the
+        # anthropic SDK installed — relevant when another provider is in use.
+        if self._client is None:
+            import anthropic
+
+            self._client = anthropic.Anthropic()
+        return self._client
+
+    def complete_json(self, *, system: str, user: str, schema: dict) -> str:
+        output_config: dict = {"format": {"type": "json_schema", "schema": schema}}
+        if self.effort:
+            output_config["effort"] = self.effort
+
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_config=output_config,
+        )
+
+        # Safety classifiers can decline a request; content is then empty or
+        # partial, so check before indexing into it.
+        if response.stop_reason == "refusal":
+            raise RuntimeError(
+                f"{self.model} declined to classify this page "
+                f"(stop_reason=refusal)."
+            )
+
+        return next(block.text for block in response.content if block.type == "text")
+
+
+_BACKENDS: dict[str, Callable[[str | None], LLMBackend]] = {
+    "anthropic": lambda model: AnthropicBackend(model),
+}
+
+
+def register_backend(name: str, factory: Callable[[str | None], LLMBackend]) -> None:
+    """Register a provider under `name`.
+
+    The factory receives the configured model id (or None for the provider's
+    own default) and returns something satisfying `LLMBackend`.
+    """
+    _BACKENDS[name.lower()] = factory
+
+
+def available_backends() -> list[str]:
+    return sorted(_BACKENDS)
+
+
+def build_user_prompt(snapshot: dict) -> str:
+    """Render the page snapshot as the user turn."""
+    return (
+        "Here is a simplified description of a web page.\n\n"
+        f"{json.dumps(snapshot, indent=2)}\n\n"
+        "Identify the interactions that represent persistent, user-controlled "
+        "state."
+    )
+
+
+def _check_references(
+    candidate: PersistentMutationCandidate, elements: dict[str, dict]
+) -> str | None:
+    """Return a rejection reason, or None if every reference holds up.
+
+    Schema validation guarantees the shape. It cannot guarantee that the ids
+    the model produced exist, or that they point at the right kind of element —
+    which is exactly where a plausible-looking hallucination lands.
+    """
+    field = elements.get(candidate.field_id)
+    if field is None:
+        return f"field_id {candidate.field_id!r} is not in the snapshot"
+    if not field.get("editable"):
+        reason = "disabled" if field.get("disabled") else (
+            "readonly" if field.get("readonly") else "not editable"
+        )
+        return f"field_id {candidate.field_id!r} is {reason}"
+
+    if candidate.commit_action_id is not None:
+        # Checked before the editable test below, which would otherwise catch
+        # this case first and report it less precisely.
+        if candidate.commit_action_id == candidate.field_id:
+            return "commit_action_id is the same element as field_id"
+        action = elements.get(candidate.commit_action_id)
+        if action is None:
+            return (
+                f"commit_action_id {candidate.commit_action_id!r} is not in "
+                "the snapshot"
+            )
+        if action.get("editable"):
+            return (
+                f"commit_action_id {candidate.commit_action_id!r} is an "
+                "editable field, not a commit control"
+            )
+
+    signal = candidate.success_signal
+    if signal is not None:
+        if not signal.is_coherent():
+            return f"success_signal of type {signal.type.value!r} is missing its payload"
+        if signal.element_id is not None and signal.element_id not in elements:
+            return f"success_signal element_id {signal.element_id!r} is not in the snapshot"
+
+    return None
+
+
+def classify(
+    snapshot: dict, *, backend: LLMBackend | None = None
+) -> ClassificationResult:
+    """Map a page snapshot to persistence-testing candidates.
+
+    `snapshot` is the dict produced by `discovery.page_inspector`. Pass a
+    `backend` to choose the provider and model, or let it come from the
+    environment.
+    """
+    backend = backend or backend_from_env()
+
+    raw = backend.complete_json(
+        system=SYSTEM_PROMPT,
+        user=build_user_prompt(snapshot),
+        schema=candidate_set_schema(),
+    )
+
+    # Pydantic is the first gate: anything structurally wrong fails here.
+    parsed = CandidateSet.model_validate_json(raw)
+
+    elements = {e["id"]: e for e in snapshot.get("elements", [])}
+    kept: list[PersistentMutationCandidate] = []
+    rejected: list[RejectedCandidate] = []
+
+    for candidate in parsed.candidates:
+        reason = _check_references(candidate, elements)
+        if reason is None:
+            kept.append(candidate)
+        else:
+            rejected.append(RejectedCandidate(candidate=candidate, reason=reason))
+
+    kept.sort(key=lambda c: c.confidence, reverse=True)
+
+    return ClassificationResult(
+        url=snapshot.get("url", ""),
+        model=backend.model,
+        candidates=kept,
+        rejected=rejected,
+    )
+
+
+def backend_for(provider: str | None = None, model: str | None = None) -> LLMBackend:
+    """Build a backend explicitly, falling back to the environment per field."""
+    provider = (
+        provider or os.environ.get("BLINDSPOT_LLM_PROVIDER", DEFAULT_PROVIDER)
+    ).lower()
+    model = model or os.environ.get("BLINDSPOT_LLM_MODEL") or None
+
+    try:
+        factory = _BACKENDS[provider]
+    except KeyError:
+        raise ValueError(
+            f"Unknown LLM provider {provider!r}. "
+            f"Registered: {', '.join(available_backends())}. "
+            f"Use register_backend() to add your own."
+        ) from None
+
+    return factory(model)
+
+
+def backend_from_env() -> LLMBackend:
+    """Build a backend from BLINDSPOT_LLM_PROVIDER / BLINDSPOT_LLM_MODEL."""
+    return backend_for()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    from discovery.page_inspector import inspect_page
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("url")
+    parser.add_argument("--provider", help=f"default: {DEFAULT_PROVIDER}")
+    parser.add_argument("--model", help="provider-specific model id")
+    args = parser.parse_args()
+
+    result = classify(
+        inspect_page(args.url),
+        backend=backend_for(args.provider, args.model),
+    )
+    print(result.model_dump_json(indent=2))
