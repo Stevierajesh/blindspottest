@@ -98,7 +98,19 @@ def main(argv=None) -> int:
             else:
                 backend = backend_for(args.provider, args.model)
                 console.analyzing(backend.model)
-                classification = classify(snapshot, backend=backend)
+                try:
+                    classification = classify(snapshot, backend=backend)
+                except TypeError as exc:
+                    if "authentication" not in str(exc).lower():
+                        raise
+                    print(
+                        "\nNo API credentials found for the semantic mapper.\n"
+                        "  Set one:      export ANTHROPIC_API_KEY=sk-ant-...\n"
+                        "  Or log in:    ant auth login\n"
+                        "  Or skip the LLM entirely with --candidates <file.json>\n",
+                        file=sys.stderr,
+                    )
+                    return 2
                 candidates = classification.candidates
                 model_name = classification.model
                 console.classified(classification)
