@@ -180,8 +180,19 @@ class ConsoleReporter:
 # --------------------------------------------------------------------------
 
 
-def build_record(url: str, model: str, entries: list[dict], skipped: list) -> dict:
-    """Assemble the JSON record for one execution."""
+def build_record(
+    url: str,
+    model: str,
+    entries: list[dict],
+    skipped: list,
+    rejected: list | None = None,
+) -> dict:
+    """Assemble the JSON record for one execution.
+
+    `skipped` and `rejected` are different failures and are kept apart:
+    a rejected candidate is something the model got wrong about the page;
+    a skipped one is a real candidate no invariant could be applied to.
+    """
     return {
         "blindspot_version": "0.1",
         "url": url,
@@ -196,10 +207,21 @@ def build_record(url: str, model: str, entries: list[dict], skipped: list) -> di
             }
             for s in skipped
         ],
+        "rejected_candidates": [
+            {
+                "field_id": r.candidate.field_id,
+                "commit_action_id": r.candidate.commit_action_id,
+                "applicability_confidence": r.candidate.applicability_confidence,
+                "reason": r.reason,
+            }
+            for r in (rejected or [])
+        ],
         "summary": {
             "passed": sum(1 for e in entries if e["result"] == "holds"),
             "violations": sum(1 for e in entries if e["result"] == "violation"),
             "inconclusive": sum(1 for e in entries if e["result"] == "inconclusive"),
+            "skipped": len(skipped),
+            "rejected": len(rejected or []),
         },
     }
 
@@ -235,6 +257,10 @@ def build_entry(instance, candidate, result, verdict) -> dict:
         "restored": result.restored,
         "error": result.error,
         "duration_ms": result.duration_ms,
+        # The step trace turns "inconclusive" into "step 5 of 7 failed, and
+        # here is what it said". Teardown steps are flagged so a failed
+        # restore is distinguishable from a failed test.
+        "steps": [step.to_dict() for step in result.steps],
     }
 
 

@@ -36,7 +36,7 @@ from reporting.reporter import (
     write_record,
 )
 from runner.persistence_runner import PersistenceRunner
-from semantic.classifier import backend_for, classify
+from semantic.classifier import backend_for, classify, validate_candidates
 from semantic.schemas import CandidateSet
 
 
@@ -87,13 +87,17 @@ def main(argv=None) -> int:
 
             # --- semantic mapping (the only LLM call in the pipeline) -------
             if args.candidates:
-                candidates = CandidateSet.model_validate_json(
+                loaded = CandidateSet.model_validate_json(
                     args.candidates.read_text()
                 ).candidates
+                # Loaded candidates get the same reference check as generated
+                # ones — a stale file referring to elements that have since
+                # moved should be caught here, not halfway through a run.
+                candidates, rejected = validate_candidates(loaded, snapshot)
                 model_name = f"file:{args.candidates}"
                 console.analyzing(model_name)
                 console.classified(
-                    type("R", (), {"candidates": candidates, "rejected": []})()
+                    type("R", (), {"candidates": candidates, "rejected": rejected})()
                 )
             else:
                 backend = backend_for(args.provider, args.model)
@@ -125,6 +129,7 @@ def main(argv=None) -> int:
                     )
                     return 2
                 candidates = classification.candidates
+                rejected = classification.rejected
                 model_name = classification.model
                 console.classified(classification)
                 if args.save_candidates:
@@ -171,7 +176,7 @@ def main(argv=None) -> int:
         finally:
             browser.close()
 
-    record = build_record(args.url, model_name, entries, skipped)
+    record = build_record(args.url, model_name, entries, skipped, rejected)
     path = write_record(record, args.runs_dir)
     console.summary(verdicts, path)
 

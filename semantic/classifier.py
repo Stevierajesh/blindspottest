@@ -308,6 +308,28 @@ def _check_references(
     return None
 
 
+def validate_candidates(candidates, snapshot: dict):
+    """Split candidates into (kept, rejected) by checking every reference.
+
+    Applied wherever candidates enter the system — whether they came from a
+    model or were loaded from a file. A candidate is only trustworthy relative
+    to a snapshot, so the check belongs to the boundary, not to the LLM call.
+    """
+    elements = {e["id"]: e for e in snapshot.get("elements", [])}
+    kept: list[PersistentMutationCandidate] = []
+    rejected: list[RejectedCandidate] = []
+
+    for candidate in candidates:
+        reason = _check_references(candidate, elements)
+        if reason is None:
+            kept.append(candidate)
+        else:
+            rejected.append(RejectedCandidate(candidate=candidate, reason=reason))
+
+    kept.sort(key=lambda c: c.applicability_confidence, reverse=True)
+    return kept, rejected
+
+
 def classify(
     snapshot: dict, *, backend: LLMBackend | None = None
 ) -> ClassificationResult:
@@ -327,19 +349,7 @@ def classify(
 
     # Pydantic is the first gate: anything structurally wrong fails here.
     parsed = CandidateSet.model_validate_json(raw)
-
-    elements = {e["id"]: e for e in snapshot.get("elements", [])}
-    kept: list[PersistentMutationCandidate] = []
-    rejected: list[RejectedCandidate] = []
-
-    for candidate in parsed.candidates:
-        reason = _check_references(candidate, elements)
-        if reason is None:
-            kept.append(candidate)
-        else:
-            rejected.append(RejectedCandidate(candidate=candidate, reason=reason))
-
-    kept.sort(key=lambda c: c.applicability_confidence, reverse=True)
+    kept, rejected = validate_candidates(parsed.candidates, snapshot)
 
     return ClassificationResult(
         url=snapshot.get("url", ""),
