@@ -169,6 +169,7 @@ class RunResult:
     error: str | None = None
     duration_ms: int = 0
     restored: bool | None = None
+    notes: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -179,6 +180,7 @@ class RunResult:
             "error": self.error,
             "duration_ms": self.duration_ms,
             "restored": self.restored,
+            "notes": self.notes,
         }
 
 
@@ -189,6 +191,8 @@ class StepContext:
     observations: dict
     timeout_ms: int
     settle_ms: int
+    # Facts worth reporting that aren't observations the rule base consumes.
+    scratch: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -261,47 +265,116 @@ def _click_commit(ctx: StepContext) -> None:
 
 
 def _commit(ctx: StepContext) -> None:
-    _click_commit(ctx)
+    ctx.scratch["url_before_commit"] = ctx.page.url
+    writes: list[tuple[str, int, str]] = []
+
+    def on_response(response):
+        try:
+            method = response.request.method.upper()
+            if method in _WRITE_METHODS:
+                writes.append((method, response.status, response.url))
+        except Exception:
+            pass
+
+    ctx.page.on("response", on_response)
+    try:
+        _click_commit(ctx)
+        try:
+            ctx.page.wait_for_load_state("domcontentloaded", timeout=ctx.timeout_ms)
+        except Exception:
+            pass
+        # Give an async save (fetch/XHR with no navigation) a moment to land.
+        ctx.page.wait_for_timeout(min(ctx.settle_ms, 600))
+    finally:
+        ctx.page.remove_listener("response", on_response)
+
+    ctx.scratch["writes_during_commit"] = writes
 
 
-def _observe_success(ctx: StepContext) -> bool:
-    """Wait for the visible confirmation text the classifier predicted.
+# HTTP methods that change server state. A 2xx/3xx on one of these is the
+# strongest available evidence that the application accepted a commit — and
+# unlike reading the page, it is the same signal in every language.
+_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-    MVP supports exactly one signal form. Toasts on a timer, spinners,
-    disabled->enabled transitions, closing modals, and HTTP observation are
-    all real and all deferred.
 
-    Returns False rather than raising when the text never appears — an
-    unconfirmed commit is a real observation, and the invariant's precondition
-    turns it into `inconclusive` rather than a violation.
-    """
-    signal = ctx.instance.success_signal
-    if not signal or not signal.get("expected_pattern"):
-        return _fallback_success(ctx)
-
+def _has_text(ctx: StepContext, needle: str, timeout: int) -> bool:
     try:
         ctx.page.wait_for_function(
             "needle => document.body.innerText.toLowerCase().includes(needle)",
-            arg=signal["expected_pattern"].lower(),
-            timeout=ctx.timeout_ms,
+            arg=needle.lower(),
+            timeout=timeout,
         )
         return True
     except Exception:
         return False
 
 
-def _fallback_success(ctx: StepContext) -> bool:
-    """No usable signal — check the field still holds what we committed.
+def _observe_success(ctx: StepContext) -> bool:
+    """Decide whether the commit was confirmed.
 
-    This is an observation, not an assumption: if the commit blew the form
-    away or reset the field, the value will not still be there.
+    The classifier's predicted wording is tried first, but a wrong guess must
+    NOT be read as "the save failed". Those are different facts, and conflating
+    them is dangerous in one specific direction: a mispredicted banner would
+    turn a genuine lost-data regression into `inconclusive` and hide it. The
+    model's phrasing is a hint about where to look, not evidence about the
+    application.
+
+    So when the predicted phrase is absent we fall back to wording-independent
+    evidence that a commit actually occurred. `success_method` records which
+    test answered, so the report never conflates a confident confirmation with
+    a weak one.
     """
-    ctx.page.wait_for_timeout(ctx.settle_ms)
+    signal = ctx.instance.success_signal
+    predicted = (signal or {}).get("expected_pattern")
+
+    if predicted and _has_text(ctx, predicted, ctx.timeout_ms):
+        ctx.scratch["success_method"] = "predicted_text"
+        return True
+
+    if predicted:
+        ctx.scratch["predicted_text_missing"] = predicted
+
+    return _fallback_success(ctx)
+
+
+def _fallback_success(ctx: StepContext) -> bool:
+    """Wording-independent evidence that the commit went through.
+
+    Three tests, weakest last, and none of them reads page copy — a
+    confirmation oracle built on English words would fail on a localized app
+    and would smuggle knowledge into the runner, which is meant to hold none.
+    If none holds, the commit really was unconfirmed and `inconclusive` is the
+    honest answer.
+    """
+    ctx.page.wait_for_timeout(min(ctx.settle_ms, 600))
+
+    # 1. The commit navigated — a form POST/redirect is a strong signal that
+    #    the application accepted the submission.
+    before = ctx.scratch.get("url_before_commit")
+    if before is not None and ctx.page.url != before:
+        ctx.scratch["success_method"] = "url_changed"
+        return True
+
+    # 2. A state-changing request completed successfully. This is the only
+    #    check here that asks the application rather than the page, so it is
+    #    immune to wording, locale, and markup entirely.
+    for method, status, url in ctx.scratch.get("writes_during_commit", []):
+        if status < 400:
+            ctx.scratch["success_method"] = f"http:{method} {status}"
+            return True
+
+    # 3. The field still holds what we committed — weak, but it rules out a
+    #    form that reset or blew away on submit.
     committed = ctx.observations.get("committed_value")
     try:
-        return _read_state(ctx.page, _target(ctx), _target_label(ctx)) == committed
+        if _read_state(ctx.page, _target(ctx), _target_label(ctx)) == committed:
+            ctx.scratch["success_method"] = "value_retained"
+            return True
     except StepError:
-        return False
+        pass
+
+    ctx.scratch["success_method"] = "none"
+    return False
 
 
 def _settle(ctx: StepContext) -> None:
@@ -437,6 +510,7 @@ class PersistenceRunner:
                     step.ok for step in result.steps if step.teardown
                 )
 
+        result.notes = dict(ctx.scratch)
         result.duration_ms = int((time.monotonic() - started) * 1000)
         return result
 

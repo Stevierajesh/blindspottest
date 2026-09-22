@@ -251,6 +251,11 @@ def build_entry(instance, candidate, result, verdict) -> dict:
         "committed": result.observations.get("committed_value"),
         "observed_after_reload": result.observations.get("final_value"),
         "expected_relation": instance.expected_relation,
+        # How the commit was confirmed, and what the model predicted — without
+        # these a mispredicted banner is indistinguishable from a failed save.
+        "success_signal": instance.success_signal,
+        "success_method": result.notes.get("success_method"),
+        "predicted_text_missing": result.notes.get("predicted_text_missing"),
         "result": status_word,
         "detail": verdict.detail,
         "severity": verdict.severity,

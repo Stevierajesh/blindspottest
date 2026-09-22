@@ -61,3 +61,33 @@ My next piece of work is to find a way to discover entirety of a flow.
 
 1. Discovery
    What does the application currently expose?
+
+With this we can start to build a model of the application, in graph form.
+
+So maybe something like this:
+
+```bash
+Projects page
+→ "New Project"
+→ form with Name field
+→ "Create"
+→ Project Details page
+```
+
+The AI can ask, which of the preloaded behavior patterns does this match? 
+
+and we can have a list of possible labels, like:
+
+```bash
+CREATE_RESOURCE
+UPDATE_RESOURCE
+DELETE_RESOURCE
+PERSISTENT_MUTATION
+SORT_COLLECTION
+FILTER_COLLECTION
+AUTHENTICATE
+SEARCH
+UNKNOWN
+```
+
+and from there, we can have the knowledge engine verify that it's the correct invariant for the flow, and then generate the test.
