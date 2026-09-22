@@ -4,7 +4,7 @@ PORT ?= 3000
 BASE := http://127.0.0.1:$(PORT)
 
 .DEFAULT_GOAL := help
-.PHONY: help install demo broken profile project all scan run dash rules inspect clean
+.PHONY: help install demo broken profile project all scan run pages watch dash rules inspect clean
 
 # Is something already listening on $(PORT)?
 UP := $(PY) -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1',$(PORT)))==0 else 1)"
@@ -63,7 +63,13 @@ scan:  ## Scan any URL: make scan URL=http://localhost:8080/settings
 	@test -n "$(URL)" || { echo "usage: make scan URL=<url>"; exit 2; }
 	$(PY) main.py $(URL) $(ARGS)
 
-run:  ## Serve the demo app in the foreground (for browsing it by hand)
+pages:  ## Open the three demo pages in your browser
+	$(PY) -m demo_app.app $(PORT) --open
+
+watch:  ## Scan the broken page with the browser visible
+	$(call with_app, $(PY) main.py $(BASE)/profile-broken --headed $(ARGS))
+
+run:  ## Serve the demo app in the foreground (no browser)
 	$(PY) -m demo_app.app $(PORT)
 
 dash:  ## Build runs/dashboard.html from recorded runs and open it

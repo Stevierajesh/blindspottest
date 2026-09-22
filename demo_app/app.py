@@ -20,6 +20,7 @@ Run:  python -m demo_app.app
 
 from __future__ import annotations
 
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -175,18 +176,41 @@ class Handler(BaseHTTPRequestHandler):
 def serve(port: int = 3000, background: bool = False) -> HTTPServer:
     server = HTTPServer(("127.0.0.1", port), Handler)
     if background:
-        import threading
-
         threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+LABELS = {
+    "/profile": "Page A — persistence works",
+    "/profile-broken": "Page B — says 'Saved successfully', drops Bio",
+    "/project-settings": "Page C — different wording, same invariant",
+}
 
 
 if __name__ == "__main__":
     import sys
 
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
-    server = serve(port)
-    print(f"BlindSpot demo app on http://127.0.0.1:{port}")
-    for path in ROUTES:
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    port = int(args[0]) if args else 3000
+    server = serve(port, background="--open" in sys.argv)
+
+    print(f"\nBlindSpot demo app — http://127.0.0.1:{port}\n")
+    for path, label in LABELS.items():
         print(f"  http://127.0.0.1:{port}{path}")
-    server.serve_forever()
+        print(f"      {label}\n")
+    print("Ctrl-C to stop.\n")
+
+    if "--open" in sys.argv:
+        import webbrowser
+
+        for path in LABELS:
+            webbrowser.open(f"http://127.0.0.1:{port}{path}")
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
+    else:
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
