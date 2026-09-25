@@ -90,4 +90,80 @@ SEARCH
 UNKNOWN
 ```
 
-and from there, we can have the knowledge engine verify that it's the correct invariant for the flow, and then generate the test.
+We can have the system learn new behaviour patterns and add them to invarients if needed.
+
+
+and from there, we can have the knowledge engine verify that it's the correct invariant for the flow, and then generate the test instances to test on the runner.
+
+
+## The demo application
+
+Flow discovery needs flows to discover, so the demo is now a small but whole app
+rather than three forms. `make run` serves it, `make pages` opens it.
+
+```bash
+/                    overview
+/login  /account     sign in, contact details, sign out
+/projects            list -> new -> detail -> edit -> delete
+/catalog             search, category filter, sort
+/cart                cart -> contact -> [upsell] -> shipping -> payment -> confirmation
+/profile             the original persistence page
+/project-settings    the same invariant in different words
+```
+
+The checkout is the one that makes the argument. The upsell step only appears
+when the subtotal clears $150, so two runs of the *correct* application take two
+different paths:
+
+```bash
+Cart -> Contact -> Shipping -> Payment -> Confirmation
+Cart -> Contact -> Upsell -> Shipping -> Payment -> Confirmation
+```
+
+Both are valid. Nothing about the path is the specification — what has to hold is
+that the confirmation lists what was in the cart and the total equals the sum of
+the lines it shows.
+
+### Two builds
+
+The whole app is mounted twice from the same code:
+
+```bash
+/            sound
+/broken/...  same app, one behaviour changed per flow
+```
+
+Same templates, same wording, same markup — so finding the defect is a testing
+problem and not a reading-comprehension one. What is planted where:
+
+| flow | defect |
+|---|---|
+| profile | Bio is never written; the page still says "Saved successfully" |
+| account | sign out shows the confirmation but never clears the session |
+| projects | delete is a soft delete: row disappears, resource still reachable, still counted |
+| catalog | the price sort orders the rendered string, so $1,299.00 sorts before $89.00 |
+| checkout | the protection plan is listed on the confirmation but left out of the total |
+
+Only the first is a persistence bug. The other four are the kind the current MVP
+structurally cannot see: they are conditions about a *flow's outcome* — something
+no longer existing, an order between rows, a sum across lines — not about one
+field surviving a reload.
+
+### What the current pipeline does with it
+
+`make broken` still works exactly as before — it finds the dropped Bio on a
+single page. `make edit` points the same pipeline at the project edit form and
+comes back **inconclusive**: the commit navigates to the detail page, so when the
+runner reloads and goes looking for the field it was watching, the field isn't
+there. Nothing is wrong with the application. The test is shaped like a page and
+the behaviour is shaped like a flow, which is the gap to close.
+
+### Ground truth
+
+`make truth` (or `/__truth`) prints, per flow, the capability, the goal
+conditions, the invariants, the paths a run may take, and the planted defect.
+It is there so flow discovery can be scored against something instead of
+eyeballed. Nothing in the app reads it, and no page links to it.
+
+State is per browser session (a cookie) and the two builds keep separate copies,
+so two scans never collide, and `POST /reset` puts a session back to the seed.
