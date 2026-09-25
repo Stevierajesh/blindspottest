@@ -117,6 +117,7 @@ _EXTRACT_JS = r"""
   // deliberately excluded: button/link text is reported as `text` instead, so
   // the two never duplicate each other.
   function accessibleName(el) {
+    const tag = el.tagName.toLowerCase();
     const aria = squash(el.getAttribute('aria-label'));
     if (aria) return aria;
 
@@ -130,11 +131,18 @@ _EXTRACT_JS = r"""
       if (parts.length) return parts.join(' ');
     }
 
-    return labelElementText(el)
+    const labelled = labelElementText(el)
         || squash(el.getAttribute('placeholder'))
-        || squash(el.getAttribute('title'))
-        || el.getAttribute('name')
-        || null;
+        || squash(el.getAttribute('title'));
+    if (labelled) return labelled;
+
+    // `name` is a form submission key, not an accessible name. It is a decent
+    // last resort for an unlabelled field, but never for a button: a button's
+    // name comes from its content, and reporting name="action" here would hand
+    // the runner a locator that matches nothing.
+    const type = tag === 'input' ? inputType(el) : null;
+    const isButton = tag === 'button' || VALUELESS_INPUTS.has(type);
+    return isButton ? null : (el.getAttribute('name') || null);
   }
 
   // Context that isn't the label: helper text, character limits, validation

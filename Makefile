@@ -4,7 +4,7 @@ PORT ?= 3000
 BASE := http://127.0.0.1:$(PORT)
 
 .DEFAULT_GOAL := help
-.PHONY: help install demo broken profile project all scan run pages watch dash rules inspect clean
+.PHONY: help install demo broken profile project edit all scan run pages watch dash rules inspect truth clean
 
 # Is something already listening on $(PORT)?
 UP := $(PY) -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1',$(PORT)))==0 else 1)"
@@ -43,8 +43,8 @@ install:  ## Create the venv and install dependencies
 
 demo: broken  ## Start here — scan the page with the planted regression
 
-broken:  ## Scan /profile-broken — expect a violation
-	$(call with_app, $(PY) main.py $(BASE)/profile-broken $(ARGS))
+broken:  ## Scan the broken profile page — expect a violation
+	$(call with_app, $(PY) main.py $(BASE)/broken/profile $(ARGS))
 
 profile:  ## Scan /profile — expect all pass
 	$(call with_app, $(PY) main.py $(BASE)/profile $(ARGS))
@@ -52,10 +52,13 @@ profile:  ## Scan /profile — expect all pass
 project:  ## Scan /project-settings — expect all pass
 	$(call with_app, $(PY) main.py $(BASE)/project-settings $(ARGS))
 
-all:  ## Scan all three demo pages, then build the dashboard
+edit:  ## Scan a project edit form — expect inconclusive: the commit navigates away
+	$(call with_app, $(PY) main.py $(BASE)/projects/1/edit $(ARGS))
+
+all:  ## Scan the three single-page flows, then build the dashboard
 	$(call with_app, \
 	  $(PY) main.py $(BASE)/profile          $(ARGS) || true; \
-	  $(PY) main.py $(BASE)/profile-broken   $(ARGS) || true; \
+	  $(PY) main.py $(BASE)/broken/profile   $(ARGS) || true; \
 	  $(PY) main.py $(BASE)/project-settings $(ARGS) || true)
 	@$(PY) -m reporting.dashboard
 
@@ -63,11 +66,11 @@ scan:  ## Scan any URL: make scan URL=http://localhost:8080/settings
 	@test -n "$(URL)" || { echo "usage: make scan URL=<url>"; exit 2; }
 	$(PY) main.py $(URL) $(ARGS)
 
-pages:  ## Open the three demo pages in your browser
+pages:  ## Open the demo app in your browser and keep it running
 	$(PY) -m demo_app.app $(PORT) --open
 
 watch:  ## Scan the broken page with the browser visible
-	$(call with_app, $(PY) main.py $(BASE)/profile-broken --headed $(ARGS))
+	$(call with_app, $(PY) main.py $(BASE)/broken/profile --headed $(ARGS))
 
 run:  ## Serve the demo app in the foreground (no browser)
 	$(PY) -m demo_app.app $(PORT)
@@ -80,6 +83,9 @@ rules:  ## Print the loaded rule base (no browser, no network)
 
 inspect:  ## Print a page snapshot: make inspect URL=... (no LLM)
 	$(call with_app, $(PY) -m discovery.page_inspector $(or $(URL),$(BASE)/profile))
+
+truth:  ## Print what each demo flow is and where its defect is (no browser)
+	$(PY) -m demo_app.manifest
 
 clean:  ## Remove caches and run records
 	rm -rf runs __pycache__ */__pycache__
